@@ -17,64 +17,78 @@ class LunrSearchAdapter {
     }
 
     getLunrResult(input) {
+        // Parse input to extract quoted phrases and individual terms
+        const phrases = [];
+        const terms = [];
+        
+        // Match quoted phrases (e.g., "red pepper" or 'red pepper')
+        const phraseRegex = /(["'])((?:(?=(\\?))\3.)*?)\1/g;
+        let match;
+        let lastIndex = 0;
+        
+        while ((match = phraseRegex.exec(input)) !== null) {
+            // Add text before the phrase as individual terms
+            const beforePhrase = input.substring(lastIndex, match.index).trim();
+            if (beforePhrase) {
+                const beforeTokens = lunr.tokenizer(beforePhrase);
+                beforeTokens.forEach(token => terms.push(token));
+            }
+            
+            // Extract the phrase content (without quotes)
+            const phraseContent = match[2];
+            phrases.push(phraseContent);
+            
+            lastIndex = phraseRegex.lastIndex;
+        }
+        
+        // Add remaining text after last phrase as individual terms
+        const remaining = input.substring(lastIndex).trim();
+        if (remaining) {
+            const remainingTokens = lunr.tokenizer(remaining);
+            remainingTokens.forEach(token => terms.push(token));
+        }
+        
+        // If no phrases were found, treat entire input as terms (backward compatibility)
+        if (phrases.length === 0 && terms.length === 0) {
+            const tokens = lunr.tokenizer(input);
+            tokens.forEach(token => terms.push(token));
+        }
+        
+        // Store phrases for filtering (convert to lowercase for case-insensitive matching)
+        this._phrases = phrases.map(p => p.toLowerCase());
+        
+        // Build query - search for all tokens (from phrases and individual terms)
+        const allTokens = [];
+        phrases.forEach(phrase => {
+            const phraseTokens = lunr.tokenizer(phrase);
+            phraseTokens.forEach(token => allTokens.push(token));
+        });
+        terms.forEach(token => allTokens.push(token));
+        
         return this.lunrIndex.query(function (query) {
-            // Parse input to extract quoted phrases and individual terms
-            const phrases = [];
-            const terms = [];
-            
-            // Match quoted phrases (e.g., "red pepper" or 'red pepper')
-            const phraseRegex = /(["'])((?:(?=(\\?))\3.)*?)\1/g;
-            let match;
-            let lastIndex = 0;
-            
-            while ((match = phraseRegex.exec(input)) !== null) {
-                // Add text before the phrase as individual terms
-                const beforePhrase = input.substring(lastIndex, match.index).trim();
-                if (beforePhrase) {
-                    const beforeTokens = lunr.tokenizer(beforePhrase);
-                    beforeTokens.forEach(token => terms.push(token));
-                }
-                
-                // Extract the phrase content (without quotes)
-                const phraseContent = match[2];
-                phrases.push(phraseContent);
-                
-                lastIndex = phraseRegex.lastIndex;
-            }
-            
-            // Add remaining text after last phrase as individual terms
-            const remaining = input.substring(lastIndex).trim();
-            if (remaining) {
-                const remainingTokens = lunr.tokenizer(remaining);
-                remainingTokens.forEach(token => terms.push(token));
-            }
-            
-            // If no phrases were found, treat entire input as terms (backward compatibility)
-            if (phrases.length === 0 && terms.length === 0) {
-                const tokens = lunr.tokenizer(input);
-                tokens.forEach(token => terms.push(token));
-            }
-            
-            // Add phrase queries with high boost
-            phrases.forEach(phrase => {
-                const phraseTokens = lunr.tokenizer(phrase);
-                if (phraseTokens.length > 0) {
-                    query.phrase(phraseTokens, {
-                        boost: 100
-                    });
-                }
-            });
-            
-            // Add individual term queries
-            if (terms.length > 0) {
-                query.term(terms, {
+            // Add all tokens with boost
+            if (allTokens.length > 0) {
+                query.term(allTokens, {
                     boost: 10
                 });
-                query.term(terms, {
+                query.term(allTokens, {
                     wildcard: lunr.Query.wildcard.TRAILING
                 });
             }
         });
+    }
+    
+    // Check if a document contains a phrase (tokens in sequence)
+    _containsPhrase(doc, phrase) {
+        const phraseLower = phrase.toLowerCase();
+        const contentLower = (doc.content || '').toLowerCase();
+        const titleLower = (doc.title || '').toLowerCase();
+        const keywordsLower = (doc.keywords || '').toLowerCase();
+        
+        // Check if phrase appears in content, title, or keywords
+        return contentLower.includes(phraseLower) || 
+               titleLower.includes(phraseLower) || 
+               keywordsLower.includes(phraseLower);
     }
 
     getHit(doc, formattedTitle, formattedContent) {
@@ -173,10 +187,23 @@ class LunrSearchAdapter {
         return new Promise((resolve, rej) => {
             const results = this.getLunrResult(input);
             const hits = [];
-            results.length > this.maxHits && (results.length = this.maxHits);
             this.titleHitsRes = []
             this.contentHitsRes = []
-            results.forEach(result => {
+            
+            // Filter results: if we have phrases, only include docs that contain at least one phrase
+            const filteredResults = results.filter(result => {
+                const doc = this.searchDocs[result.ref];
+                // If no phrases specified, include all results
+                if (!this._phrases || this._phrases.length === 0) {
+                    return true;
+                }
+                // Check if document contains any of the phrases
+                return this._phrases.some(phrase => this._containsPhrase(doc, phrase));
+            });
+            
+            filteredResults.length > this.maxHits && (filteredResults.length = this.maxHits);
+            
+            filteredResults.forEach(result => {
                 const doc = this.searchDocs[result.ref];
                 const { metadata } = result.matchData;
                 for (let i in metadata) {
