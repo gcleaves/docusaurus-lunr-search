@@ -18,13 +18,62 @@ class LunrSearchAdapter {
 
     getLunrResult(input) {
         return this.lunrIndex.query(function (query) {
-            const tokens = lunr.tokenizer(input);
-            query.term(tokens, {
-                boost: 10
+            // Parse input to extract quoted phrases and individual terms
+            const phrases = [];
+            const terms = [];
+            
+            // Match quoted phrases (e.g., "red pepper" or 'red pepper')
+            const phraseRegex = /(["'])((?:(?=(\\?))\3.)*?)\1/g;
+            let match;
+            let lastIndex = 0;
+            
+            while ((match = phraseRegex.exec(input)) !== null) {
+                // Add text before the phrase as individual terms
+                const beforePhrase = input.substring(lastIndex, match.index).trim();
+                if (beforePhrase) {
+                    const beforeTokens = lunr.tokenizer(beforePhrase);
+                    beforeTokens.forEach(token => terms.push(token));
+                }
+                
+                // Extract the phrase content (without quotes)
+                const phraseContent = match[2];
+                phrases.push(phraseContent);
+                
+                lastIndex = phraseRegex.lastIndex;
+            }
+            
+            // Add remaining text after last phrase as individual terms
+            const remaining = input.substring(lastIndex).trim();
+            if (remaining) {
+                const remainingTokens = lunr.tokenizer(remaining);
+                remainingTokens.forEach(token => terms.push(token));
+            }
+            
+            // If no phrases were found, treat entire input as terms (backward compatibility)
+            if (phrases.length === 0 && terms.length === 0) {
+                const tokens = lunr.tokenizer(input);
+                tokens.forEach(token => terms.push(token));
+            }
+            
+            // Add phrase queries with high boost
+            phrases.forEach(phrase => {
+                const phraseTokens = lunr.tokenizer(phrase);
+                if (phraseTokens.length > 0) {
+                    query.phrase(phraseTokens, {
+                        boost: 100
+                    });
+                }
             });
-            query.term(tokens, {
-                wildcard: lunr.Query.wildcard.TRAILING
-            });
+            
+            // Add individual term queries
+            if (terms.length > 0) {
+                query.term(terms, {
+                    boost: 10
+                });
+                query.term(terms, {
+                    wildcard: lunr.Query.wildcard.TRAILING
+                });
+            }
         });
     }
 
